@@ -1,4 +1,13 @@
-// server.js - Main application file
+/**
+ * server.js - Main application file
+ *
+ * Professional Chatwoot Ticket Automation Backend
+ * Handles webhook ingestion, ticket assignment, and database cleanup for Chatwoot.
+ *
+ * Author: DotmacTech
+ * License: MIT
+ */
+
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -8,7 +17,8 @@ const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 
-// Set up logging
+// ========== LOGGING SETUP ==========
+// Create logs directory if it doesn't exist
 const logDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logDir)) {
   fs.mkdirSync(logDir);
@@ -16,27 +26,41 @@ if (!fs.existsSync(logDir)) {
 const logFile = path.join(logDir, 'chatwoot-automation.log');
 const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-// Custom logger function
+/**
+ * Logs a message to both the console and the log file, with timestamp and level.
+ * @param {string} message - The message to log.
+ * @param {string} [level='INFO'] - Log level (INFO, ERROR, WARNING, etc).
+ */
 function logger(message, level = 'INFO') {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] [${level}] ${message}`;
-  
   // Log to console
   console.log(logMessage);
-  
   // Log to file
   logStream.write(logMessage + '\n');
 }
 
+// ========== ENVIRONMENT CONFIGURATION ==========
 const app = express();
 const PORT = process.env.PORT || 3050;
-const CHATWOOT_API_KEY = process.env.CHATWOOT_API_KEY;
-const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
-const CHATWOOT_TEAM_ID = process.env.CHATWOOT_TEAM_ID;
-const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL || 'https://chat.dotmac.ng/api/v1';
+const CHATWOOT_API_KEY = process.env.CHATWOOT_API_KEY; // Chatwoot API key (required)
+const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID; // Chatwoot account ID (required)
+const CHATWOOT_TEAM_ID = process.env.CHATWOOT_TEAM_ID; // Team ID to assign tickets to (required)
+const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL || 'https://chat.dotmac.ng/api/v1'; // API base URL
 const DB_CLEANUP_DAYS = process.env.DB_CLEANUP_DAYS || 7; // Days to keep processed records before deletion
 
-// Initialize database
+// ========== DATABASE INITIALIZATION ==========
+/**
+ * SQLite database for storing conversation records.
+ * Table: conversations
+ * Columns:
+ *   - id: INTEGER PRIMARY KEY
+ *   - status: TEXT
+ *   - created_at: INTEGER (UNIX timestamp)
+ *   - inbox_id: INTEGER
+ *   - processed: BOOLEAN (0 = not processed, 1 = processed)
+ *   - processed_at: INTEGER (UNIX timestamp, when processed)
+ */
 const db = new sqlite3.Database('./conversations.db', (err) => {
   if (err) {
     logger(`Error opening database: ${err.message}`, 'ERROR');
@@ -55,7 +79,6 @@ const db = new sqlite3.Database('./conversations.db', (err) => {
         logger(`Error creating table: ${err.message}`, 'ERROR');
       } else {
         logger('Table created or already exists.');
-        
         // Log the current conversations in the database
         db.all('SELECT * FROM conversations', [], (err, rows) => {
           if (err) {
@@ -72,32 +95,42 @@ const db = new sqlite3.Database('./conversations.db', (err) => {
   }
 });
 
-// Middleware
+// ========== MIDDLEWARE ==========
+// Parse JSON bodies for incoming requests
 app.use(bodyParser.json());
 
-// Webhook endpoint to receive Chatwoot payloads
+/**
+ * Webhook endpoint to receive Chatwoot payloads.
+ *
+ * This endpoint is triggered by Chatwoot webhooks when a new conversation is created.
+ * It extracts the conversation data and stores it in the local SQLite database for processing.
+ *
+ * Expected payload: {
+ *   event: 'conversation_created',
+ *   id: <conversation_id>,
+ *   status: <status>,
+ *   created_at: <timestamp>,
+ *   inbox_id: <inbox_id>,
+ *   ...
+ * }
+ */
 app.post('/webhook/chatwoot', (req, res) => {
   logger('Webhook received. Processing payload...');
-  
   try {
     const payload = req.body;
     logger(`Webhook payload: ${JSON.stringify(payload)}`);
-    
-    // Check if this is a conversation_created event
+    // Only process conversation_created events
     if (payload.event === 'conversation_created') {
       logger('Conversation created event detected');
-      
-      // Extract conversation details from the new payload structure
+      // Extract conversation details from payload
       const conversation = {
         id: payload.id,
         status: payload.status,
         created_at: payload.created_at || payload.timestamp,
         inbox_id: payload.inbox_id
       };
-      
       logger(`Extracted conversation data: ${JSON.stringify(conversation)}`);
-      
-      // Store in database
+      // Store conversation in the database (idempotent)
       const stmt = db.prepare('INSERT OR REPLACE INTO conversations (id, status, created_at, inbox_id, processed) VALUES (?, ?, ?, ?, 0)');
       stmt.run(
         conversation.id,
@@ -116,7 +149,6 @@ app.post('/webhook/chatwoot', (req, res) => {
     } else {
       logger(`Ignoring non-conversation_created event: ${payload.event}`);
     }
-    
     res.status(200).send('Webhook received');
   } catch (error) {
     logger(`Error processing webhook: ${error.message}`, 'ERROR');
@@ -125,13 +157,23 @@ app.post('/webhook/chatwoot', (req, res) => {
   }
 });
 
-// Add a test endpoint to verify server is running
+/**
+ * Health check endpoint.
+ *
+ * Returns 200 OK if the server is running.
+ * Useful for monitoring and uptime checks.
+ */
 app.get('/health', (req, res) => {
   logger('Health check endpoint accessed');
   res.status(200).send('Server is running');
 });
 
-// Add a debug endpoint to test database connection
+/**
+ * Debug endpoint to test database connection and view all conversations.
+ *
+ * Returns all rows from the conversations table as JSON.
+ * Use for diagnostics and debugging only.
+ */
 app.get('/debug/db', (req, res) => {
   logger('Database debug endpoint accessed');
   db.all('SELECT * FROM conversations', [], (err, rows) => {
@@ -145,20 +187,24 @@ app.get('/debug/db', (req, res) => {
   });
 });
 
-// Function to check conversation status via API
+/**
+ * Checks the current status of a conversation via the Chatwoot API.
+ *
+ * @param {number} conversationId - The Chatwoot conversation ID.
+ * @returns {Promise<string|null>} - The current status (e.g., 'pending', 'open', etc) or null on error.
+ */
 async function checkConversationStatus(conversationId) {
   logger(`Checking status for conversation ${conversationId}...`);
   try {
     const url = `${CHATWOOT_BASE_URL}/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}`;
     logger(`Making API request to: ${url}`);
-    
+    // Use API key as header for authentication
     const response = await axios.get(url, {
       headers: {
         'Content-Type': 'application/json',
         'api_access_token': CHATWOOT_API_KEY
       }
     });
-    
     logger(`Conversation ${conversationId} status: ${response.data.status}`);
     return response.data.status;
   } catch (error) {
@@ -170,13 +216,17 @@ async function checkConversationStatus(conversationId) {
   }
 }
 
-// Function to set conversation to open
+/**
+ * Sets a conversation's status to 'open' via the Chatwoot API.
+ *
+ * @param {number} conversationId - The Chatwoot conversation ID.
+ * @returns {Promise<boolean>} - True if successful, false otherwise.
+ */
 async function openConversation(conversationId) {
   logger(`Opening conversation ${conversationId}...`);
   try {
     const url = `${CHATWOOT_BASE_URL}/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/toggle_status`;
     logger(`Making API request to: ${url}`);
-    
     const response = await axios.post(
       url,
       {
@@ -189,7 +239,6 @@ async function openConversation(conversationId) {
         }
       }
     );
-    
     logger(`Conversation ${conversationId} opened successfully. Response: ${JSON.stringify(response.data)}`);
     return true;
   } catch (error) {
@@ -201,13 +250,17 @@ async function openConversation(conversationId) {
   }
 }
 
-// Function to assign conversation to team
+/**
+ * Assigns a conversation to the configured team via the Chatwoot API.
+ *
+ * @param {number} conversationId - The Chatwoot conversation ID.
+ * @returns {Promise<boolean>} - True if successful, false otherwise.
+ */
 async function assignConversationToTeam(conversationId) {
   logger(`Assigning conversation ${conversationId} to team ${CHATWOOT_TEAM_ID}...`);
   try {
     const url = `${CHATWOOT_BASE_URL}/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/assignments`;
     logger(`Making API request to: ${url}`);
-    
     const response = await axios.post(
       url,
       {
@@ -220,7 +273,6 @@ async function assignConversationToTeam(conversationId) {
         }
       }
     );
-    
     logger(`Conversation ${conversationId} assigned to team ${CHATWOOT_TEAM_ID} successfully. Response: ${JSON.stringify(response.data)}`);
     return true;
   } catch (error) {
@@ -232,18 +284,24 @@ async function assignConversationToTeam(conversationId) {
   }
 }
 
-// Function to process pending conversations
+/**
+ * Processes all pending conversations older than 30 minutes.
+ *
+ * - Checks for conversations in the database that are still 'pending' and not yet processed.
+ * - For each, confirms status via Chatwoot API.
+ * - If still pending, opens the conversation and assigns it to the configured team.
+ * - Marks the conversation as processed in the database with a processed_at timestamp.
+ * - If status is not pending, updates the status and marks as processed.
+ *
+ * This function is intended to be run on a schedule (cron job).
+ */
 async function processPendingConversations() {
   logger('Running cron job to process pending conversations...');
-  
   // Get current timestamp in seconds
   const currentTime = Math.floor(Date.now() / 1000);
-  
   // 30 minutes in seconds
   const thirtyMinutesAgo = currentTime - (30 * 60);
-  
   logger(`Current time: ${currentTime}, Checking for conversations created before: ${thirtyMinutesAgo}`);
-  
   // Query for pending conversations older than 30 minutes
   db.all(
     `SELECT id, created_at FROM conversations 
@@ -256,29 +314,21 @@ async function processPendingConversations() {
         logger(`Error querying database: ${err.message}`, 'ERROR');
         return;
       }
-      
       logger(`Found ${rows.length} pending conversations to process`);
-      
       for (const row of rows) {
         const conversationId = row.id;
         const createdAt = row.created_at;
         const minutesAgo = Math.round((currentTime - createdAt) / 60);
-        
         logger(`Processing conversation ${conversationId} (created ${minutesAgo} minutes ago)...`);
-        
         // Double-check the current status via API
         const currentStatus = await checkConversationStatus(conversationId);
-        
         if (currentStatus === 'pending') {
           logger(`Conversation ${conversationId} is still pending, opening it...`);
-          
           // Open the conversation
           const openSuccess = await openConversation(conversationId);
-          
           if (openSuccess) {
             // Assign to team
             const assignSuccess = await assignConversationToTeam(conversationId);
-            
             // Mark as processed in database with processed_at timestamp
             db.run(
               'UPDATE conversations SET processed = 1, status = "open", processed_at = ? WHERE id = ?', 
@@ -313,18 +363,19 @@ async function processPendingConversations() {
   );
 }
 
-// Function to clean up processed conversations
+/**
+ * Cleans up processed conversations from the database that are older than the configured retention period.
+ *
+ * - Deletes conversations marked as processed (processed = 1) and with processed_at older than DB_CLEANUP_DAYS.
+ * - Intended to be run as a daily cron job.
+ */
 function cleanupProcessedConversations() {
   logger('Running database cleanup for processed conversations...');
-  
   // Get current timestamp in seconds
   const currentTime = Math.floor(Date.now() / 1000);
-  
   // Calculate cutoff time (default: 7 days ago)
   const cleanupCutoff = currentTime - (parseInt(DB_CLEANUP_DAYS) * 24 * 60 * 60);
-  
   logger(`Current time: ${currentTime}, Removing processed conversations from before: ${cleanupCutoff}`);
-  
   // Delete processed conversations older than the cutoff
   db.run(
     `DELETE FROM conversations 
@@ -341,25 +392,34 @@ function cleanupProcessedConversations() {
   );
 }
 
-// Add endpoint to manually trigger processing
+/**
+ * Endpoint to manually trigger processing of pending conversations.
+ * Useful for testing and manual intervention.
+ */
 app.get('/process-now', (req, res) => {
   logger('Manual processing triggered');
   processPendingConversations();
   res.status(200).send('Processing triggered');
 });
 
-// Add endpoint to manually trigger cleanup
+/**
+ * Endpoint to manually trigger cleanup of processed conversations.
+ * Useful for testing and manual intervention.
+ */
 app.get('/cleanup-now', (req, res) => {
   logger('Manual cleanup triggered');
   cleanupProcessedConversations();
   res.status(200).send('Cleanup triggered');
 });
 
-// Get server IP address
+/**
+ * Utility function to get the server's IPv4 addresses.
+ * Used for logging and debugging.
+ * @returns {Object} - Mapping of network interface names to arrays of IP addresses.
+ */
 function getServerIp() {
   const nets = require('os').networkInterfaces();
   const results = {};
-  
   for (const name of Object.keys(nets)) {
     for (const net of nets[name]) {
       // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
@@ -371,20 +431,27 @@ function getServerIp() {
       }
     }
   }
-  
   return results;
 }
 
-// Schedule cron jobs
-// Process pending conversations every 5 minutes
+// ========== CRON JOBS ==========
+/**
+ * Schedules the cron job to process pending conversations every 1 minute.
+ *
+ * This ensures conversations are handled promptly.
+ */
 const processCronJob = cron.schedule('*/1 * * * *', processPendingConversations);
 logger('Processing cron job scheduled to run every 1 minutes');
 
-// Clean up processed conversations once a day at midnight
+/**
+ * Schedules the cron job to clean up processed conversations daily at midnight.
+ *
+ * This keeps the database size manageable and removes old data.
+ */
 const cleanupCronJob = cron.schedule('0 0 * * *', cleanupProcessedConversations);
 logger('Cleanup cron job scheduled to run daily at midnight');
 
-// Start server
+// ========== SERVER STARTUP ==========
 app.listen(PORT, () => {
   const serverIp = getServerIp();
   logger(`Server running on port ${PORT}`);
@@ -394,8 +461,7 @@ app.listen(PORT, () => {
   logger(`Database debug: http://<YOUR_SERVER_IP_OR_DOMAIN>:${PORT}/debug/db`);
   logger(`Manual processing: http://<YOUR_SERVER_IP_OR_DOMAIN>:${PORT}/process-now`);
   logger(`Manual cleanup: http://<YOUR_SERVER_IP_OR_DOMAIN>:${PORT}/cleanup-now`);
-  
-  // Validate environment variables
+  // Validate environment variables for production safety
   if (!CHATWOOT_API_KEY) {
     logger('CHATWOOT_API_KEY is not set in .env file', 'ERROR');
   }
@@ -405,7 +471,6 @@ app.listen(PORT, () => {
   if (!CHATWOOT_TEAM_ID) {
     logger('CHATWOOT_TEAM_ID is not set in .env file', 'ERROR');
   }
-  
   logger(`Environment configuration:`);
   logger(`- CHATWOOT_BASE_URL: ${CHATWOOT_BASE_URL}`);
   logger(`- CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID || 'NOT SET'}`);
